@@ -1,0 +1,24 @@
+[package]
+name = "sthrottle"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+embedded-hal = "0.2.7"
+nb = "1"
+cortex-m = "0.7.6"
+cortex-m-rt = "0.7.1"
+# Panic behaviour, see https://crates.io/keywords/panic-impl for alternatives
+panic-semihosting = "0.6.0"
+cortex-m-semihosting = "0.5.0"
+usbd-human-interface-device = { path = "./usbd-human-interface-device-0.4.5" }
+usb-device = "0.2.9"
+heapless = "0.8.0"
+
+[dependencies.stm32f1xx-hal]
+version = "0.10.0"
+features = ["rt", "stm32f103", "medium"]
+
+[profile.dev]
+opt-level = 3
+lto = "thin"
