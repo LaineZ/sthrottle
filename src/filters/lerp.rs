@@ -1,5 +1,3 @@
-use cortex_m_semihosting::hprintln;
-
 use super::{floor, ProcessingSteps};
 
 #[derive(Default)]

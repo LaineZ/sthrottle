@@ -1,4 +1,4 @@
-use crate::filters::{floor, ProcessingStep, ProcessingSteps};
+use crate::filters::{floor, ProcessingSteps};
 
 pub struct Axis<const N: usize> {
     min: u16,
