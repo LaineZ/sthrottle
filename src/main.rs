@@ -2,13 +2,10 @@
 #![no_main]
 extern crate panic_semihosting;
 
+use axis::effects::Step;
 use axis::Axis;
 use cortex_m::asm::delay;
 use cortex_m_rt::entry;
-use cortex_m_semihosting::hprintln;
-use filters::delta_pass::DeltaPass;
-use filters::lerp::Lerp;
-use filters::mean::Mean;
 use stm32f1xx_hal::adc;
 use stm32f1xx_hal::usb::Peripheral;
 use stm32f1xx_hal::{pac, prelude::*};
@@ -17,15 +14,10 @@ use usbd_human_interface_device::device::joystick::JoystickReport;
 use usbd_human_interface_device::usb_class::UsbHidClassBuilder;
 use usbd_human_interface_device::UsbHidError;
 
-mod filters;
-mod axis;
-
 #[entry]
 fn main() -> ! {
     let _cp = cortex_m::Peripherals::take().unwrap();
     let dp = pac::Peripherals::take().unwrap();
-
-
     let mut flash = dp.FLASH.constrain();
     let rcc = dp.RCC.constrain();
 
@@ -61,30 +53,29 @@ fn main() -> ! {
 
     let mut adc1 = adc::Adc::adc1(dp.ADC1, clocks);
     
-    let mut throttle_pot = gpioa.pa7.into_analog(&mut gpioa.crl);
-    let mut prop_pot = gpioa.pa6.into_analog(&mut gpioa.crl);
-    let mut mixture_pot = gpioa.pa5.into_analog(&mut gpioa.crl);
-    
-    let mut throttle_axis: Axis<2> = Axis::new(3300, 4090, true);
-    throttle_axis.add_filter(Mean::new());
-    throttle_axis.add_filter(DeltaPass::new(5));
-    let mut prop_axis: Axis<2> = Axis::new(3350, 4090, true);
-    prop_axis.add_filter(Mean::new());
-    throttle_axis.add_filter(DeltaPass::new(5));
+    let mut throttle_pot = gpioa.pa1.into_analog(&mut gpioa.crl);
+    let mut prop_pot = gpioa.pa2.into_analog(&mut gpioa.crl);
+    let mut mixture_pot = gpioa.pa3.into_analog(&mut gpioa.crl);
+    let mut calibrate_pot = gpioa.pa4.into_analog(&mut gpioa.crl);
 
-    let mut mixture_axis: Axis<2> = Axis::new(3300, 4090, true);
-    mixture_axis.add_filter(Mean::new());
-    throttle_axis.add_filter(DeltaPass::new(5));
+    let mut throttle_axis = Axis::new(3300, 4090, true);
+    let mut prop_axis = Axis::new(3350, 4090, true);
+    let mut mixture_axis = Axis::new(3300, 4090, true);
+    let mut calibrate_value = Axis::new(0, 4096, true);
 
     loop {
+        let mut chain = [
+            Step::new(calibrate_value.output(5, 20)).into()
+        ]; 
         let report = JoystickReport {
-            x: throttle_axis.output_ranged(0, 1024),
-            y: prop_axis.output_ranged(0, 1024),
-            z: mixture_axis.output_ranged(0, 1024),
+            x: throttle_axis.output(0, 1024),
+            y: prop_axis.output(0, 1024),
+            z: mixture_axis.output(0, 1024),
             buttons: 0
         };
 
-        //hprintln!("{} {} {}", report.x, report.y, report.z);
+
+        cortex_m_semihosting::hprintln!("{}", calibrate_value.output(5, 20));
         delay(1);
         match joy.device().write_report(&report) {
             Err(UsbHidError::WouldBlock) => {}
@@ -94,10 +85,12 @@ fn main() -> ! {
             }
         }
 
+        calibrate_value.update(adc1.read(&mut calibrate_pot).unwrap_or_default(), core::iter::empty());
+
         if !usb_dev.poll(&mut [&mut joy]) {
-            throttle_axis.process(adc1.read(&mut throttle_pot).unwrap_or_default()); 
-            prop_axis.process(adc1.read(&mut prop_pot).unwrap_or_default());
-            mixture_axis.process(adc1.read(&mut mixture_pot).unwrap_or_default());
+           throttle_axis.update(adc1.read(&mut throttle_pot).unwrap_or_default(), chain.iter_mut()); 
+           prop_axis.update(adc1.read(&mut prop_pot).unwrap_or_default(), chain.iter_mut());
+           mixture_axis.update(adc1.read(&mut mixture_pot).unwrap_or_default(), chain.iter_mut());
         }
     }
 }

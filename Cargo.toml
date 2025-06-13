@@ -14,6 +14,7 @@ cortex-m-semihosting = "0.5.0"
 usbd-human-interface-device = { path = "./usbd-human-interface-device-0.4.5" }
 usb-device = "0.2.9"
 heapless = "0.8.0"
+axis = { path = "../axis" }
 
 [dependencies.stm32f1xx-hal]
 version = "0.10.0"
