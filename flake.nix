@@ -32,11 +32,16 @@
             pkg-config
             gdb
             probe-rs-tools
+            gcc-arm-embedded
           ];
 
           RUST_SRC_PATH = "${toolchain}/lib/rustlib/src/rust/library";
           #LIBCLANG_PATH = "${pkgs.llvmPackages_19.libclang.lib}/lib";
           RUST_BACKTRACE = 1;
+          shellHook = ''
+          export CC=arm-none-eabi-gcc
+          echo "Using CC=$CC"
+          '';
         };
       }
     );

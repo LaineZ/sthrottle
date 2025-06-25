@@ -1,20 +1,38 @@
 #![no_std]
 #![no_main]
+
+pub mod button;
+
 extern crate panic_semihosting;
-
-pub mod stage;
-
 use axis::{Axis, DynEffect};
+use button::Button;
 use cortex_m::asm::delay;
 use cortex_m_rt::entry;
-use stage::Stage;
-use stm32f1xx_hal::adc;
+use embedded_hal::digital::v2::OutputPin;
+use stm32f1xx_hal::timer::{Channel, Tim1FullRemap, Tim1NoRemap, Tim2FullRemap, Tim2NoRemap, Tim2PartialRemap2, Tim3NoRemap, Timer};
 use stm32f1xx_hal::usb::Peripheral;
-use stm32f1xx_hal::{pac, prelude::*};
+use stm32f1xx_hal::{pac, adc, prelude::*};
 use usb_device::device::{UsbDeviceBuilder, UsbVidPid};
 use usbd_human_interface_device::device::joystick::JoystickReport;
 use usbd_human_interface_device::usb_class::UsbHidClassBuilder;
 use usbd_human_interface_device::UsbHidError;
+
+#[derive(PartialEq, Clone, Copy)]
+/// Allowed stages to operate
+/// TODO: Implement all stages
+pub enum Stage {
+    /// Default mode, 3 axes, one button for enable/disable reverse
+    Normal,
+    /// Multiplexes the thorttle axis. This stage made for workaround X-Plane input system which
+    /// allows bind ONLY ONE action on axis, and for somre reason reverse thrust can be set for
+    /// separate engines only
+    NormalXplane,
+    /// Calibration stage for minimum range for all axes
+    CalibrationStageLow,
+    /// Calibration stage for max range for all axes
+    CalibrationStageHigh,
+}
+
 
 #[derive(Clone, Copy)]
 struct CalibrationAxisData {
@@ -35,9 +53,14 @@ impl Default for CalibrationAxisData {
 
 #[derive(Clone, Default, Copy)]
 struct CalibrationData {
-    trottle_axis: CalibrationAxisData,
+    throttle_axis: CalibrationAxisData,
     prop_axis: CalibrationAxisData,
     mixture_axis: CalibrationAxisData,
+}
+
+struct IndicationLED<P: OutputPin> {
+    pin: P,
+    current_tick: u32
 }
 
 #[entry]
@@ -56,16 +79,22 @@ fn main() -> ! {
 
     let mut gpioa = dp.GPIOA.split();
     let mut gpiob = dp.GPIOB.split();
+    let mut afio = dp.AFIO.constrain();
 
     let mut state = Stage::Normal;
     let mut chain: [DynEffect; 0] = [];
 
     let mut usb_dp = gpioa.pa12.into_push_pull_output(&mut gpioa.crh);
-    let mut calibrate_button = gpiob.pb12.into_pull_up_input(&mut gpiob.crh);
-    let mut mode_switch_button = gpiob.pb1.into_pull_up_input(&mut gpiob.crl);
-    let mut indication_led = gpioa.pa5.into_push_pull_output(&mut gpioa.crl);
+    let mut indication_led = gpioa.pa7.into_alternate_push_pull(&mut gpioa.crl);
 
     let mut adc1 = adc::Adc::adc1(dp.ADC1, clocks);
+    let mut pwm = dp.TIM3.pwm_hz::<Tim3NoRemap, _, _>(indication_led, &mut afio.mapr, 1.Hz(), &clocks);
+
+    pwm.enable(Channel::C1);
+    pwm.enable(Channel::C2);
+    pwm.enable(Channel::C3);
+
+    pwm.set_duty(Channel::C2, 0);
 
     let mut throttle_pot = gpioa.pa1.into_analog(&mut gpioa.crl);
     let mut prop_pot = gpioa.pa2.into_analog(&mut gpioa.crl);
@@ -75,10 +104,12 @@ fn main() -> ! {
     // TODO: Load calibration data from flash
     let mut calibration_data = CalibrationData::default();
 
-    let mut throttle_axis = Axis::new(3300, 4090, true);
-    let mut prop_axis = Axis::new(3350, 4090, true);
-    let mut mixture_axis = Axis::new(3300, 4090, true);
+    let mut throttle_axis = Axis::new(calibration_data.throttle_axis.min, calibration_data.throttle_axis.max, true);
+    let mut prop_axis = Axis::new(calibration_data.prop_axis.min, calibration_data.prop_axis.max, true);
+    let mut mixture_axis = Axis::new(calibration_data.mixture_axis.min, calibration_data.mixture_axis.max, true);
     let mut calibrate_value = Axis::new(0, 4096, true);
+    // TODO: Reverse button
+    let mut calibrate_button = Button::new(gpiob.pb1.into_pull_up_input(&mut gpiob.crl)); 
 
     assert!(clocks.usbclk_valid());
     usb_dp.set_low();
@@ -91,7 +122,7 @@ fn main() -> ! {
     };
 
     let usb_bus = stm32f1xx_hal::usb::UsbBus::new(usb);
-    let mut joy = UsbHidClassBuilder::new()
+    let mut joystick = UsbHidClassBuilder::new()
         .add_device(usbd_human_interface_device::device::joystick::JoystickConfig::default())
         .build(&usb_bus);
     let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x16c0, 0x27de))
@@ -127,7 +158,7 @@ fn main() -> ! {
 
                 cortex_m_semihosting::hprintln!("{}", step_filter_factor);
                 delay(1);
-                match joy.device().write_report(&report) {
+                match joystick.device().write_report(&report) {
                     Err(UsbHidError::WouldBlock) => {}
                     Ok(_) => {}
                     Err(e) => {
@@ -135,7 +166,7 @@ fn main() -> ! {
                     }
                 }
 
-                if !usb_dev.poll(&mut [&mut joy]) {
+                if !usb_dev.poll(&mut [&mut joystick]) {
                     throttle_axis.update(
                         throttle_readings,
                         chain.iter_mut(),
@@ -151,25 +182,22 @@ fn main() -> ! {
                 }
             }
             Stage::CalibrationStageLow => {
-               indication_led.set_high();
-               calibration_data.trottle_axis.min = throttle_readings;
+               pwm.set_duty(Channel::C3, pwm.get_max_duty() / 4);
+               calibration_data.throttle_axis.min = throttle_readings;
                calibration_data.prop_axis.min = prop_readings;
                calibration_data.mixture_axis.min = mixture_readings;
-               if calibrate_button.is_low() { 
+               if calibrate_button.pressed() { 
                    state = Stage::CalibrationStageHigh;
                };
             },
             Stage::CalibrationStageHigh => {
-                // TODO: Make non-blocking delay
-                indication_led.set_low();
-                delay(500);
-                indication_led.set_high();
-
-               calibration_data.trottle_axis.max = throttle_readings;
+               pwm.set_duty(Channel::C3, pwm.get_max_duty() / 2);
+               calibration_data.throttle_axis.max = throttle_readings;
                calibration_data.prop_axis.max = prop_readings;
                calibration_data.mixture_axis.max = mixture_readings;
-               if calibrate_button.is_low() { 
-                   state = Stage::CalibrationStageHigh;
+               if calibrate_button.pressed() { 
+                   state = Stage::Normal;
+                   pwm.set_duty(Channel::C3, 0);
                };
             },
         };

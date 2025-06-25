@@ -7,7 +7,7 @@ use usb_device::bus::UsbBus;
 use usb_device::class_prelude::UsbBusAllocator;
 
 #[rustfmt::skip]
-pub const JOYSTICK_DESCRIPTOR: &[u8] = &[
+pub const DEFAULT_JOYSTICK_DESCRIPTOR: &[u8] = &[
     0x05, 0x01, // Usage Page (Generic Desktop)         5,   1
     0x09, 0x04, // Usage (Joystick)                     9,   4
     0xa1, 0x01, // Collection (Application)             161, 1
@@ -81,11 +81,24 @@ pub struct JoystickConfig<'a> {
     interface: InterfaceConfig<'a, InBytes8, OutNone, ReportSingle>,
 }
 
+impl<'a> JoystickConfig<'a> {
+    pub fn new_with_descriptor(descriptior: &'a [u8]) -> Self {
+         Self::new(
+            unwrap!(unwrap!(InterfaceBuilder::new(descriptior))
+                .boot_device(InterfaceProtocol::None)
+                .description("Joystick")
+                .in_endpoint(10.millis()))
+            .without_out_endpoint()
+            .build(),
+        )
+    }
+}
+
 impl<'a> Default for JoystickConfig<'a> {
     #[must_use]
     fn default() -> Self {
         Self::new(
-            unwrap!(unwrap!(InterfaceBuilder::new(JOYSTICK_DESCRIPTOR))
+            unwrap!(unwrap!(InterfaceBuilder::new(DEFAULT_JOYSTICK_DESCRIPTOR))
                 .boot_device(InterfaceProtocol::None)
                 .description("Joystick")
                 .in_endpoint(10.millis()))
