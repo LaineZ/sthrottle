@@ -8,14 +8,19 @@ use axis::{Axis, DynEffect};
 use button::Button;
 use cortex_m::asm::delay;
 use cortex_m_rt::entry;
-use embedded_hal::digital::v2::OutputPin;
-use stm32f1xx_hal::timer::{Channel, Tim1FullRemap, Tim1NoRemap, Tim2FullRemap, Tim2NoRemap, Tim2PartialRemap2, Tim3NoRemap, Timer};
+use cortex_m_semihosting::hprintln;
+use heapless::Vec;
+use stm32f1xx_hal::flash::{FlashSize, FlashWriter, SectorSize};
+use stm32f1xx_hal::timer::{Channel, Tim3NoRemap};
 use stm32f1xx_hal::usb::Peripheral;
 use stm32f1xx_hal::{pac, adc, prelude::*};
 use usb_device::device::{UsbDeviceBuilder, UsbVidPid};
 use usbd_human_interface_device::device::joystick::JoystickReport;
 use usbd_human_interface_device::usb_class::UsbHidClassBuilder;
 use usbd_human_interface_device::UsbHidError;
+
+const FLASH_BASE: usize = 0x0800_0000;
+const LAST_PAGE_ADDRESS: usize = 0x0800_F800;
 
 #[derive(PartialEq, Clone, Copy)]
 /// Allowed stages to operate
@@ -33,34 +38,66 @@ pub enum Stage {
     CalibrationStageHigh,
 }
 
-
-#[derive(Clone, Copy)]
-struct CalibrationAxisData {
-    min: u16,
-    max: u16,
-    reversed: bool,
+#[repr(C)]
+struct Config {
+    throttle_axis_min: u16,
+    throttle_axis_max: u16,
+    prop_axis_min: u16,
+    prop_axis_max: u16,
+    mixture_axis_min: u16,
+    mixture_axis_max: u16
 }
 
-impl Default for CalibrationAxisData {
-    fn default() -> Self {
+impl Config {
+    fn new(writer: &FlashWriter) -> Self {
+        // TODO: Proper error handling
+        // FIXME: Reinterpret struct instead of extracting fields manually?
+        let base_offset = LAST_PAGE_ADDRESS - FLASH_BASE;  // 0xF800
+        let values = writer.read(base_offset as u32, 12).unwrap();
+        let data: Vec<u16, 6> = values
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect();
+
+
         Self {
-            min: 3300,
-            max: 4090,
-            reversed: true,
+            throttle_axis_min: data[0],
+            throttle_axis_max: data[1],
+            prop_axis_min: data[2],
+            prop_axis_max: data[3],
+            mixture_axis_min: data[4],
+            mixture_axis_max: data[5],
         }
+    }
+
+    fn save(&self, writer: &mut FlashWriter) {
+        // TODO: Proper error handling
+        // FIXME: Reinterpret struct instead of extracting fields manually?
+        let base_offset = LAST_PAGE_ADDRESS - FLASH_BASE;  // 0xF800
+        let data: [u16; 6] = [self.throttle_axis_min, self.throttle_axis_max, self.prop_axis_min, self.prop_axis_max, self.mixture_axis_min, self.mixture_axis_max];
+        writer.page_erase(base_offset as u32);
+
+        hprintln!("writing...");
+        for (i, val) in data.iter().enumerate() {
+            let addr = base_offset as u32 + i as u32 * 2;
+            writer.write(addr, &val.to_le_bytes()).unwrap();
+        }
+
+        hprintln!("done!");
     }
 }
 
-#[derive(Clone, Default, Copy)]
-struct CalibrationData {
-    throttle_axis: CalibrationAxisData,
-    prop_axis: CalibrationAxisData,
-    mixture_axis: CalibrationAxisData,
-}
-
-struct IndicationLED<P: OutputPin> {
-    pin: P,
-    current_tick: u32
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            throttle_axis_min: 3300,
+            throttle_axis_max: 4090,
+            prop_axis_min: 3300,
+            prop_axis_max: 4090,
+            mixture_axis_min: 3300,
+            mixture_axis_max: 4090,
+        }
+    }
 }
 
 #[entry]
@@ -76,6 +113,9 @@ fn main() -> ! {
         .pclk1(24.MHz())
         .adcclk(2.MHz())
         .freeze(&mut flash.acr);
+
+    // flash writer
+    let mut writer = flash.writer(SectorSize::Sz1K, FlashSize::Sz64K);
 
     let mut gpioa = dp.GPIOA.split();
     let mut gpiob = dp.GPIOB.split();
@@ -102,11 +142,11 @@ fn main() -> ! {
     let mut calibrate_pot = gpioa.pa4.into_analog(&mut gpioa.crl);
 
     // TODO: Load calibration data from flash
-    let mut calibration_data = CalibrationData::default();
+    //let mut calibration_data = CalibrationData::default();
 
-    let mut throttle_axis = Axis::new(calibration_data.throttle_axis.min, calibration_data.throttle_axis.max, true);
-    let mut prop_axis = Axis::new(calibration_data.prop_axis.min, calibration_data.prop_axis.max, true);
-    let mut mixture_axis = Axis::new(calibration_data.mixture_axis.min, calibration_data.mixture_axis.max, true);
+    let mut throttle_axis = Axis::new(0, 4096, true);
+    let mut prop_axis = Axis::new(0, 4096, true);
+    let mut mixture_axis = Axis::new(0, 4096, true);
     let mut calibrate_value = Axis::new(0, 4096, true);
     // TODO: Reverse button
     let mut calibrate_button = Button::new(gpiob.pb1.into_pull_up_input(&mut gpiob.crl)); 
@@ -183,18 +223,12 @@ fn main() -> ! {
             }
             Stage::CalibrationStageLow => {
                pwm.set_duty(Channel::C3, pwm.get_max_duty() / 4);
-               calibration_data.throttle_axis.min = throttle_readings;
-               calibration_data.prop_axis.min = prop_readings;
-               calibration_data.mixture_axis.min = mixture_readings;
                if calibrate_button.pressed() { 
                    state = Stage::CalibrationStageHigh;
                };
             },
             Stage::CalibrationStageHigh => {
                pwm.set_duty(Channel::C3, pwm.get_max_duty() / 2);
-               calibration_data.throttle_axis.max = throttle_readings;
-               calibration_data.prop_axis.max = prop_readings;
-               calibration_data.mixture_axis.max = mixture_readings;
                if calibrate_button.pressed() { 
                    state = Stage::Normal;
                    pwm.set_duty(Channel::C3, 0);
