@@ -5,6 +5,7 @@ version = 4
 [[package]]
 name = "axis"
 version = "0.1.0"
+source = "git+https://github.com/LaineZ/axis#fa5b76c3e430155f78715e19315d079d649f5985"
 dependencies = [
  "micromath",
 ]
