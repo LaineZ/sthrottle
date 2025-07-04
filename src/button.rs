@@ -1,4 +1,4 @@
-use cortex_m_semihosting::hprintln;
+//use cortex_m_semihosting::hprintln;
 use embedded_hal::digital::v2::InputPin;
 const DEBOUNCE_DELAY: u32 = 20;
 
@@ -21,11 +21,15 @@ impl<P: InputPin> Button<P> {
     }
 
     pub fn toggle(&mut self) -> bool {
-        self.pressed();
+        self.click();
         self.old_state
     }
 
-    pub fn pressed(&mut self) -> bool {
+    pub fn pressed(&self) -> bool {
+        self.pin.is_low().unwrap_or_default()
+    }
+
+    pub fn click(&mut self) -> bool {
         self.current = self.current.wrapping_add(1);
         let state = self.pin.is_low().unwrap_or_default();
         //hprintln!("{} {}", self.current, self.last_change);

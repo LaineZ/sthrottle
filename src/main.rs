@@ -4,11 +4,12 @@
 pub mod button;
 
 extern crate panic_semihosting;
+use axis::effects::{Lerp, Smooth};
 use axis::{Axis, DynEffect};
 use button::Button;
 use cortex_m::asm::delay;
 use cortex_m_rt::entry;
-use cortex_m_semihosting::hprintln;
+//use cortex_m_semihosting::hprintln;
 use heapless::Vec;
 use stm32f1xx_hal::flash::{FlashSize, FlashWriter, SectorSize};
 use stm32f1xx_hal::timer::{Channel, Tim3NoRemap};
@@ -61,7 +62,7 @@ impl Config {
             .collect();
 
         if data[0] == CONFIG_MAGIC {
-            hprintln!("Configuration loaded! {:?}", data);
+            //hprintln!("Configuration loaded! {:?}", data);
             Self {
                 throttle_axis_min: data[1],
                 throttle_axis_max: data[2],
@@ -71,7 +72,7 @@ impl Config {
                 mixture_axis_max: data[6],
             }
         } else {
-            hprintln!("Loading default config");
+            //hprintln!("Loading default config");
             Self::default()
         }
     }
@@ -91,13 +92,13 @@ impl Config {
         ];
         writer.page_erase(base_offset as u32).unwrap();
 
-        hprintln!("writing...");
+        //hprintln!("writing...");
         for (i, val) in data.iter().enumerate() {
             let addr = base_offset as u32 + i as u32 * 2;
             writer.write(addr, &val.to_le_bytes()).unwrap();
         }
 
-        hprintln!("done!");
+        //hprintln!("done!");
     }
 
     fn new_thorttle(&self) -> Axis {
@@ -148,7 +149,13 @@ fn main() -> ! {
     let mut afio = dp.AFIO.constrain();
 
     let mut state = Stage::Normal;
-    let mut chain: [DynEffect; 0] = [];
+    let chain: [DynEffect; 1] = [
+        Smooth::new(5).into()
+    ];
+
+    let mut thorttle_chain = chain.clone();
+    let mut prop_chain = chain.clone();
+    let mut mixture_chain = chain.clone();
 
     let mut usb_dp = gpioa.pa12.into_push_pull_output(&mut gpioa.crh);
     let indication_led = gpioa.pa7.into_alternate_push_pull(&mut gpioa.crl);
@@ -164,10 +171,10 @@ fn main() -> ! {
 
     pwm.set_duty(Channel::C2, 0);
 
-    let mut throttle_pot = gpioa.pa0.into_analog(&mut gpioa.crl);
-    let mut prop_pot = gpioa.pa1.into_analog(&mut gpioa.crl);
+    let mut throttle_pot = gpioa.pa3.into_analog(&mut gpioa.crl);
+    let mut prop_pot = gpioa.pa0.into_analog(&mut gpioa.crl);
     let mut mixture_pot = gpioa.pa2.into_analog(&mut gpioa.crl);
-    let mut calibrate_pot = gpioa.pa3.into_analog(&mut gpioa.crl);
+    let mut calibrate_pot = gpioa.pa4.into_analog(&mut gpioa.crl);
 
     let mut config = Config::new(&writer);
 
@@ -176,7 +183,7 @@ fn main() -> ! {
     let mut mixture_axis = config.new_mixture();
     let mut calibrate_value = Axis::new(0, 4096, true);
 
-    let mut reverse_button = Button::new(gpioa.pa4.into_pull_up_input(&mut gpioa.crl));
+    let reverse_button = Button::new(gpioa.pa1.into_pull_up_input(&mut gpioa.crl));
     let mut calibrate_button = Button::new(gpiob.pb12.into_pull_up_input(&mut gpiob.crh));
 
     assert!(clocks.usbclk_valid());
@@ -214,14 +221,14 @@ fn main() -> ! {
         let prop_readings = adc1.read(&mut prop_pot).unwrap_or_default();
         let mixture_readings = adc1.read(&mut mixture_pot).unwrap_or_default();
 
-        //hprintln!("{:?}", state);
+        //hprintln!("{} {} {}", throttle_readings, prop_readings, mixture_readings);
         match state {
             Stage::NormalXplane => todo!(),
             Stage::Normal => {
                 let buttons = if reverse_button.pressed() {
-                    0b00000000
+                    0b00000001
                 } else {
-                    0b10000000
+                    0b00000000
                 };
 
                 let report = JoystickReport {
@@ -241,11 +248,11 @@ fn main() -> ! {
                 }
 
                 if !usb_dev.poll(&mut [&mut joystick]) {
-                    throttle_axis.update(throttle_readings, chain.iter_mut());
-                    prop_axis.update(prop_readings, chain.iter_mut());
-                    mixture_axis.update(mixture_readings, chain.iter_mut());
+                    throttle_axis.update(throttle_readings, thorttle_chain.iter_mut());
+                    prop_axis.update(prop_readings, prop_chain.iter_mut());
+                    mixture_axis.update(mixture_readings, mixture_chain.iter_mut());
 
-                    if calibrate_button.pressed() {
+                    if calibrate_button.click() {
                         state = Stage::CalibrationStageLow;
                     }
                 }
@@ -255,7 +262,7 @@ fn main() -> ! {
                 config.throttle_axis_min = throttle_readings.min(config.throttle_axis_max);
                 config.prop_axis_min = prop_readings.min(config.prop_axis_max);
                 config.mixture_axis_min = mixture_readings.min(config.mixture_axis_max);
-                if calibrate_button.pressed() {
+                if calibrate_button.click() {
                     state = Stage::CalibrationStageHigh;
                 };
             }
@@ -264,7 +271,7 @@ fn main() -> ! {
                 config.throttle_axis_max = throttle_readings.max(config.throttle_axis_min);
                 config.prop_axis_max = prop_readings.max(config.prop_axis_min);
                 config.mixture_axis_max = mixture_readings.max(config.mixture_axis_min);
-                if calibrate_button.pressed() {
+                if calibrate_button.click() {
                     config.save(&mut writer);
                     pwm.set_duty(Channel::C2, 0);
                     throttle_axis = config.new_thorttle();
